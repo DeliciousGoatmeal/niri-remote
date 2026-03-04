@@ -1,8 +1,6 @@
 # Niri Touch Deck (`niri-remote`)
 
 
-*(Tip: Replace the line above with an actual screenshot or GIF of your tablet running the UI!)*
-
 A real-time, interactive Terminal User Interface (TUI) and Command Line multi-tool for the [Niri Wayland Compositor](https://github.com/YaLTeR/niri). 
 
 Built with Rust and Ratatui, this tool visualizes your exact multi-monitor workspace and window layout in the terminal. It is built from the ground up to be used over **SSH from a tablet or phone**, acting as a physical touch-screen "Stream Deck" to control your Linux desktop. 
