@@ -25,15 +25,15 @@ Don't want to use the UI? It also doubles as a blazing-fast CLI to instantly mov
 Clone the repository and build the optimized release binary:
 
 ```bash
-git clone [https://github.com/yourusername/niri-ascii.git](https://github.com/yourusername/niri-ascii.git)
+git clone [https://github.com/DeliciousGoatmeal/niri-ascii.git](https://github.com/DeliciousGoatmeal/niri-ascii.git)
 cd niri-ascii
 cargo build --release
 The compiled binary will be located at target/release/niri-ascii.
-
+```
 💻 Usage: CLI Mode
 You can interact with your Wayland windows purely from the command line without ever launching the visual TUI. The tool features smart string-matching, so you don't need to type the exact window title!
 
-Bash
+```bash
 # List all active windows and their IDs
 niri-remote list
 
@@ -48,7 +48,7 @@ niri-remote fullscreen discord
 niri-remote close steam
 📱 Usage: The Tablet / SSH Setup (TUI Mode)
 If you run the app with no arguments (niri-remote), it launches the interactive terminal UI.
-
+```
 While you can run this locally in your terminal, the real magic is running it from an external touch device (like an iPad or Android tablet) via SSH.
 
 The Wayland Socket Gotcha:
@@ -56,22 +56,24 @@ Because SSH sessions are blind to your Wayland graphical environment, the app ne
 
 If you use Bash/Zsh (~/.bashrc or ~/.zshrc):
 
-Bash
+```Bash
 niri-remote() {
     export NIRI_SOCKET=$(find /run/user/$(id -u)/ -maxdepth 1 -type s -name "niri.*.sock" | head -n 1)
     ~/path/to/niri-ascii/target/release/niri-ascii "$@"
 }
 If you use Fish (~/.config/fish/config.fish):
 
+```Bash
 Code snippet
 function niri-remote
     set -x NIRI_SOCKET (find /run/user/(id -u)/ -maxdepth 1 -type s -name "niri.*.sock" | head -n 1)
     ~/path/to/niri-ascii/target/release/niri-ascii $argv
 end
+```
 Now, simply SSH into your PC from your tablet and run:
-
-Bash
+```Bash
 niri-remote
+```
 ⌨️ Local Keybindings
 If you are running the TUI locally using a keyboard instead of touch:
 
