@@ -1,4 +1,4 @@
-# Niri Touch Deck (`niri-ascii`)
+# Niri Touch Deck (`niri-remote`)
 
 
 *(Tip: Replace the line above with an actual screenshot or GIF of your tablet running the UI!)*
