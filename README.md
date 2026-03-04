@@ -46,9 +46,10 @@ niri-remote fullscreen discord
 
 # Close a window
 niri-remote close steam
+```
 📱 Usage: The Tablet / SSH Setup (TUI Mode)
 If you run the app with no arguments (niri-remote), it launches the interactive terminal UI.
-```
+
 While you can run this locally in your terminal, the real magic is running it from an external touch device (like an iPad or Android tablet) via SSH.
 
 The Wayland Socket Gotcha:
@@ -61,9 +62,9 @@ niri-remote() {
     export NIRI_SOCKET=$(find /run/user/$(id -u)/ -maxdepth 1 -type s -name "niri.*.sock" | head -n 1)
     ~/path/to/niri-ascii/target/release/niri-ascii "$@"
 }
+```
 If you use Fish (~/.config/fish/config.fish):
-
-```Bash
+```
 Code snippet
 function niri-remote
     set -x NIRI_SOCKET (find /run/user/(id -u)/ -maxdepth 1 -type s -name "niri.*.sock" | head -n 1)
