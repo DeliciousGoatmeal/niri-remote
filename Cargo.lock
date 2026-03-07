@@ -632,7 +632,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "niri-ascii"
+name = "niri-remote"
 version = "0.1.0"
 dependencies = [
  "crossterm",

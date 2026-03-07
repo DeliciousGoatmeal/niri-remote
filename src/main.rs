@@ -13,6 +13,12 @@ use ratatui::{
 use serde::Deserialize;
 use std::{collections::{BTreeMap, HashMap}, env, io::{self, stdout}, process::Command, time::Instant};
 
+#[derive(Clone, Copy)]
+enum Action {
+    Niri(&'static str),
+    SwapMonitors,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 struct Workspace { id: u64, output: Option<String> }
 
@@ -26,12 +32,96 @@ fn niri_action(args: &[&str]) {
     let _ = Command::new("niri").arg("msg").arg("action").args(args).output();
 }
 
+// THE NEW, FOOLPROOF WORKSPACE SWAP
+fn swap_monitors() {
+    // 1. Get monitors
+    let out_output = Command::new("niri").args(["msg", "-j", "outputs"]).output().unwrap();
+    let outputs_json: serde_json::Value = serde_json::from_slice(&out_output.stdout).unwrap_or_default();
+    
+    let mut monitors = Vec::new();
+    let extract_monitor = |name: &str, val: &serde_json::Value| -> Option<(String, f64)> {
+        let x = val.get("logical").and_then(|l| l.get("x")).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        Some((name.to_string(), x))
+    };
+
+    if let Some(map) = outputs_json.as_object() {
+        for val in map.values() {
+            if let Some(name) = val.get("name").and_then(|n| n.as_str()) {
+                if let Some(mon) = extract_monitor(name, val) { monitors.push(mon); }
+            }
+        }
+    } else if let Some(arr) = outputs_json.as_array() {
+        for val in arr {
+            if let Some(name) = val.get("name").and_then(|n| n.as_str()) {
+                if let Some(mon) = extract_monitor(name, val) { monitors.push(mon); }
+            }
+        }
+    }
+
+    if monitors.len() >= 2 {
+        monitors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        
+        let left_mon = &monitors[0].0;
+        let right_mon = &monitors[1].0;
+
+        // 2. Find the ACTIVE Workspace IDs for both monitors
+        let ws_output = Command::new("niri").args(["msg", "-j", "workspaces"]).output().unwrap();
+        let workspaces_json: Vec<serde_json::Value> = serde_json::from_slice(&ws_output.stdout).unwrap_or_default();
+        
+        let mut left_ws_id = None;
+        let mut right_ws_id = None;
+
+        for ws in workspaces_json {
+            if ws.get("is_active").and_then(|a| a.as_bool()).unwrap_or(false) {
+                if let Some(out) = ws.get("output").and_then(|o| o.as_str()) {
+                    if out == left_mon {
+                        left_ws_id = ws.get("id").and_then(|id| id.as_u64());
+                    } else if out == right_mon {
+                        right_ws_id = ws.get("id").and_then(|id| id.as_u64());
+                    }
+                }
+            }
+        }
+
+        // 3. Find a Window ID on those workspaces so we can focus them
+        let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output().unwrap();
+        let windows_json: Vec<serde_json::Value> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
+
+        let mut left_win_id = None;
+        let mut right_win_id = None;
+
+        for win in windows_json {
+            if let Some(ws_id) = win.get("workspace_id").and_then(|id| id.as_u64()) {
+                if Some(ws_id) == left_ws_id {
+                    left_win_id = win.get("id").and_then(|id| id.as_u64());
+                } else if Some(ws_id) == right_ws_id {
+                    right_win_id = win.get("id").and_then(|id| id.as_u64());
+                }
+            }
+        }
+
+        // 4. Swap them by targeting the absolute Window IDs!
+        if let Some(l_win) = left_win_id {
+            let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &l_win.to_string()]).output();
+            let _ = Command::new("niri").args(["msg", "action", "move-workspace-to-monitor-right"]).output();
+        }
+        if let Some(r_win) = right_win_id {
+            let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &r_win.to_string()]).output();
+            let _ = Command::new("niri").args(["msg", "action", "move-workspace-to-monitor-left"]).output();
+        }
+    }
+}
+
 fn main() -> io::Result<()> {
-    // --- CLI ARGUMENT PARSER ---
     let args: Vec<String> = env::args().collect();
     
     if args.len() > 1 {
         match args[1].as_str() {
+            "swap" => {
+                println!("Swapping monitor workspaces...");
+                swap_monitors();
+                return Ok(());
+            },
             "list" => {
                 let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output()?;
                 let windows: Vec<Window> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
@@ -48,31 +138,23 @@ fn main() -> io::Result<()> {
             "close" | "fullscreen" => {
                 if args.len() < 3 {
                     println!("Usage: niri-remote {} <window_id_or_title>", args[1]);
-                    println!("Example: niri-remote {} 123", args[1]);
-                    println!("Example: niri-remote {} brave", args[1]);
                     return Ok(());
                 }
 
                 let action_cmd = args[1].as_str();
                 let win_arg = &args[2];
 
-                // 1. Resolve Target Window
                 let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output()?;
                 let windows: Vec<Window> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
                 
-                let target_win_id = if let Ok(id) = win_arg.parse::<u64>() {
-                    id 
-                } else {
+                let target_win_id = if let Ok(id) = win_arg.parse::<u64>() { id } else {
                     let lower_arg = win_arg.to_lowercase();
-                    if let Some(w) = windows.iter().find(|w| w.title.as_deref().unwrap_or("").to_lowercase().contains(&lower_arg)) {
-                        w.id
-                    } else {
+                    if let Some(w) = windows.iter().find(|w| w.title.as_deref().unwrap_or("").to_lowercase().contains(&lower_arg)) { w.id } else {
                         println!("Error: Could not find open window matching '{}'", win_arg);
                         return Ok(());
                     }
                 };
 
-                // 2. Execute Action
                 let niri_cmd = if action_cmd == "close" { "close-window" } else { "fullscreen-window" };
                 println!("Sending '{}' to window ID {}...", action_cmd, target_win_id);
                 
@@ -85,31 +167,23 @@ fn main() -> io::Result<()> {
             "move" => {
                 if args.len() < 5 || args[3] != "to" {
                     println!("Usage: niri-remote move <window_id_or_title> to <display_id_or_name>");
-                    println!("Example: niri-remote move 123 to 2");
-                    println!("Example: niri-remote move Firefox to DP-1");
                     return Ok(());
                 }
                 
                 let win_arg = &args[2];
                 let mon_arg = &args[4];
 
-                // 1. Resolve Target Window
                 let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output()?;
                 let windows: Vec<Window> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
                 
-                let target_win_id = if let Ok(id) = win_arg.parse::<u64>() {
-                    id 
-                } else {
+                let target_win_id = if let Ok(id) = win_arg.parse::<u64>() { id } else {
                     let lower_arg = win_arg.to_lowercase();
-                    if let Some(w) = windows.iter().find(|w| w.title.as_deref().unwrap_or("").to_lowercase().contains(&lower_arg)) {
-                        w.id
-                    } else {
+                    if let Some(w) = windows.iter().find(|w| w.title.as_deref().unwrap_or("").to_lowercase().contains(&lower_arg)) { w.id } else {
                         println!("Error: Could not find open window matching '{}'", win_arg);
                         return Ok(());
                     }
                 };
 
-                // 2. Resolve Target Monitor
                 let out_output = Command::new("niri").args(["msg", "-j", "outputs"]).output()?;
                 let outputs_json: serde_json::Value = serde_json::from_slice(&out_output.stdout).unwrap_or_default();
                 let mut monitors = Vec::new();
@@ -135,9 +209,7 @@ fn main() -> io::Result<()> {
                     let workspaces: Vec<Workspace> = serde_json::from_slice(&ws_output.stdout).unwrap_or_default();
                     for ws in workspaces {
                         if let Some(output) = ws.output {
-                            if !monitors.iter().any(|(n, _)| n == &output) {
-                                monitors.push((output, 0.0));
-                            }
+                            if !monitors.iter().any(|(n, _)| n == &output) { monitors.push((output, 0.0)); }
                         }
                     }
                 }
@@ -145,17 +217,12 @@ fn main() -> io::Result<()> {
                 monitors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                 
                 let target_mon_name = if let Ok(idx) = mon_arg.parse::<usize>() {
-                    if idx > 0 && idx <= monitors.len() {
-                        monitors[idx - 1].0.clone()
-                    } else {
-                        println!("Error: Display number {} is out of range. You have {} displays.", idx, monitors.len());
+                    if idx > 0 && idx <= monitors.len() { monitors[idx - 1].0.clone() } else {
+                        println!("Error: Display number {} is out of range.", idx);
                         return Ok(());
                     }
-                } else {
-                    mon_arg.clone() 
-                };
+                } else { mon_arg.clone() };
 
-                // 3. Move the Window
                 println!("Moving window ID {} to display '{}'...", target_win_id, target_mon_name);
                 let id_str = target_win_id.to_string();
                 niri_action(&["focus-window", "--id", &id_str]);
@@ -164,20 +231,19 @@ fn main() -> io::Result<()> {
                 return Ok(());
             },
             _ => {
-                println!("Unknown command. Use 'list', 'move', 'close', 'fullscreen', or run without arguments to start the UI.");
+                println!("Unknown command. Use 'list', 'move', 'close', 'fullscreen', 'swap', or run without arguments to start the UI.");
                 return Ok(());
             }
         }
     }
 
-    // --- TUI STARTUP ---
     stdout().execute(EnterAlternateScreen)?;
     stdout().execute(EnableMouseCapture)?;
     enable_raw_mode()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let mut click_map_windows: Vec<(Rect, u64)> = Vec::new();
-    let mut click_map_buttons: Vec<(Rect, &'static str)> = Vec::new();
+    let mut click_map_buttons: Vec<(Rect, Action)> = Vec::new();
 
     let mut needs_refresh = true;
     let mut last_refresh = Instant::now();
@@ -253,7 +319,7 @@ fn main() -> io::Result<()> {
             click_map_buttons.clear();
             let area = frame.area();
 
-            let main_chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(5), Constraint::Length(6)]).split(area);
+            let main_chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(5), Constraint::Length(9)]).split(area);
 
             let num_monitors = ordered_monitors.len() as u32;
             if num_monitors == 0 {
@@ -319,23 +385,28 @@ fn main() -> io::Result<()> {
                 }
             }
 
-            let toolbar_rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(main_chunks[1]);
+            let toolbar_rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)])
+                .split(main_chunks[1]);
+                
             let row1_chunks = Layout::default().direction(Direction::Horizontal).constraints(vec![Constraint::Ratio(1, 4); 4]).split(toolbar_rows[0]);
             let row2_chunks = Layout::default().direction(Direction::Horizontal).constraints(vec![Constraint::Ratio(1, 4); 4]).split(toolbar_rows[1]);
+            let row3_chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(100)]).split(toolbar_rows[2]);
 
             let btn_style = Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD);
             
             let btns_r1 = [
-                ("<< TO SCREEN", "move-window-to-monitor-left"),
-                ("< LEFT", "move-window-left"),
-                ("RIGHT >", "move-window-right"),
-                ("TO SCREEN >>", "move-window-to-monitor-right"),
+                ("<< TO SCREEN", Action::Niri("move-window-to-monitor-left")),
+                ("< LEFT", Action::Niri("move-window-left")),
+                ("RIGHT >", Action::Niri("move-window-right")),
+                ("TO SCREEN >>", Action::Niri("move-window-to-monitor-right")),
             ];
             let btns_r2 = [
-                ("v DOWN", "move-window-down"),
-                ("^ UP", "move-window-up"),
-                ("[ ] FULLSCREEN", "fullscreen-window"), 
-                ("X CLOSE", "close-window"),             
+                ("v DOWN", Action::Niri("move-window-down")),
+                ("^ UP", Action::Niri("move-window-up")),
+                ("[ ] FULLSCREEN", Action::Niri("fullscreen-window")), 
+                ("X CLOSE", Action::Niri("close-window")),             
             ];
 
             for i in 0..4 {
@@ -348,6 +419,17 @@ fn main() -> io::Result<()> {
                 frame.render_widget(btn_block, row2_chunks[i]);
                 click_map_buttons.push((row2_chunks[i], btns_r2[i].1));
             }
+
+            // --- FIXED: SLEEK DARK COLOR SCHEME ---
+            let swap_btn_style = Style::default().fg(Color::Cyan).bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+            let swap_btn_block = Paragraph::new("🔄 SWAP SCREENS")
+                .alignment(Alignment::Center)
+                .style(swap_btn_style)
+                .block(Block::default().borders(Borders::ALL));
+            
+            frame.render_widget(swap_btn_block, row3_chunks[0]);
+            click_map_buttons.push((row3_chunks[0], Action::SwapMonitors));
+
         })?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
@@ -388,7 +470,10 @@ fn main() -> io::Result<()> {
 
                         for (rect, action) in &click_map_buttons {
                             if tap_x >= rect.x && tap_x < rect.x + rect.width && tap_y >= rect.y && tap_y < rect.y + rect.height {
-                                niri_action(&[*action]);
+                                match action {
+                                    Action::Niri(cmd) => niri_action(&[*cmd]),
+                                    Action::SwapMonitors => swap_monitors(),
+                                }
                                 needs_refresh = true;
                                 break;
                             }
