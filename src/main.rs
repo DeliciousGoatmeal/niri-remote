@@ -32,16 +32,27 @@ fn niri_action(args: &[&str]) {
     let _ = Command::new("niri").arg("msg").arg("action").args(args).output();
 }
 
-// THE NEW, FOOLPROOF WORKSPACE SWAP
+// THE SMART SNAP: Eliminates the "shrinking gap" bug
+fn get_snapped_pct(width: f64, mon_width: f64) -> u32 {
+    let raw_pct = (width / mon_width.max(1.0)) * 100.0;
+    
+    // Snap to perfectly clean Wayland layout fractions!
+    if raw_pct > 85.0 { 100 }      // Fullscreen
+    else if raw_pct > 60.0 { 67 }  // 2/3 Screen
+    else if raw_pct > 40.0 { 50 }  // 1/2 Screen
+    else if raw_pct > 28.0 { 33 }  // 1/3 Screen
+    else { 25 }                    // 1/4 Screen
+}
+
 fn swap_monitors() {
-    // 1. Get monitors
     let out_output = Command::new("niri").args(["msg", "-j", "outputs"]).output().unwrap();
     let outputs_json: serde_json::Value = serde_json::from_slice(&out_output.stdout).unwrap_or_default();
     
     let mut monitors = Vec::new();
-    let extract_monitor = |name: &str, val: &serde_json::Value| -> Option<(String, f64)> {
+    let extract_monitor = |name: &str, val: &serde_json::Value| -> Option<(String, f64, f64)> {
         let x = val.get("logical").and_then(|l| l.get("x")).and_then(|x| x.as_f64()).unwrap_or(0.0);
-        Some((name.to_string(), x))
+        let w = val.get("logical").and_then(|l| l.get("width")).and_then(|w| w.as_f64()).unwrap_or(1920.0);
+        Some((name.to_string(), x, w))
     };
 
     if let Some(map) = outputs_json.as_object() {
@@ -62,9 +73,10 @@ fn swap_monitors() {
         monitors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         
         let left_mon = &monitors[0].0;
+        let left_mon_w = monitors[0].2;
         let right_mon = &monitors[1].0;
+        let right_mon_w = monitors[1].2;
 
-        // 2. Find the ACTIVE Workspace IDs for both monitors
         let ws_output = Command::new("niri").args(["msg", "-j", "workspaces"]).output().unwrap();
         let workspaces_json: Vec<serde_json::Value> = serde_json::from_slice(&ws_output.stdout).unwrap_or_default();
         
@@ -74,40 +86,56 @@ fn swap_monitors() {
         for ws in workspaces_json {
             if ws.get("is_active").and_then(|a| a.as_bool()).unwrap_or(false) {
                 if let Some(out) = ws.get("output").and_then(|o| o.as_str()) {
-                    if out == left_mon {
-                        left_ws_id = ws.get("id").and_then(|id| id.as_u64());
-                    } else if out == right_mon {
-                        right_ws_id = ws.get("id").and_then(|id| id.as_u64());
+                    if out == left_mon { left_ws_id = ws.get("id").and_then(|id| id.as_u64()); } 
+                    else if out == right_mon { right_ws_id = ws.get("id").and_then(|id| id.as_u64()); }
+                }
+            }
+        }
+
+        let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output().unwrap();
+        let windows_json: Vec<serde_json::Value> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
+
+        let mut left_windows: Vec<(u64, u32)> = Vec::new();
+        let mut right_windows: Vec<(u64, u32)> = Vec::new();
+
+        for win in windows_json {
+            if let Some(ws_id) = win.get("workspace_id").and_then(|id| id.as_u64()) {
+                if let Some(id) = win.get("id").and_then(|id| id.as_u64()) {
+                    let width = win.get("layout").and_then(|l| l.get("window_size")).and_then(|s| s.get(0)).and_then(|w| w.as_f64()).unwrap_or(1000.0);
+
+                    if Some(ws_id) == left_ws_id {
+                        left_windows.push((id, get_snapped_pct(width, left_mon_w)));
+                    } else if Some(ws_id) == right_ws_id {
+                        right_windows.push((id, get_snapped_pct(width, right_mon_w)));
                     }
                 }
             }
         }
 
-        // 3. Find a Window ID on those workspaces so we can focus them
-        let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output().unwrap();
-        let windows_json: Vec<serde_json::Value> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
-
-        let mut left_win_id = None;
-        let mut right_win_id = None;
-
-        for win in windows_json {
-            if let Some(ws_id) = win.get("workspace_id").and_then(|id| id.as_u64()) {
-                if Some(ws_id) == left_ws_id {
-                    left_win_id = win.get("id").and_then(|id| id.as_u64());
-                } else if Some(ws_id) == right_ws_id {
-                    right_win_id = win.get("id").and_then(|id| id.as_u64());
-                }
-            }
-        }
-
-        // 4. Swap them by targeting the absolute Window IDs!
-        if let Some(l_win) = left_win_id {
+        if let Some(&(l_win, _)) = left_windows.first() {
             let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &l_win.to_string()]).output();
             let _ = Command::new("niri").args(["msg", "action", "move-workspace-to-monitor-right"]).output();
         }
-        if let Some(r_win) = right_win_id {
+        if let Some(&(r_win, _)) = right_windows.first() {
             let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &r_win.to_string()]).output();
             let _ = Command::new("niri").args(["msg", "action", "move-workspace-to-monitor-left"]).output();
+        }
+
+        // Apply percentages and snap the camera back to the first window!
+        for (id, pct) in &left_windows {
+            let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &id.to_string()]).output();
+            let _ = Command::new("niri").args(["msg", "action", "set-column-width", &format!("{}%", pct)]).output();
+        }
+        if let Some(&(first_id, _)) = left_windows.first() {
+            let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &first_id.to_string()]).output();
+        }
+
+        for (id, pct) in &right_windows {
+            let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &id.to_string()]).output();
+            let _ = Command::new("niri").args(["msg", "action", "set-column-width", &format!("{}%", pct)]).output();
+        }
+        if let Some(&(first_id, _)) = right_windows.first() {
+            let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &first_id.to_string()]).output();
         }
     }
 }
@@ -118,7 +146,7 @@ fn main() -> io::Result<()> {
     if args.len() > 1 {
         match args[1].as_str() {
             "swap" => {
-                println!("Swapping monitor workspaces...");
+                println!("Swapping monitor workspaces and resizing proportionally...");
                 swap_monitors();
                 return Ok(());
             },
@@ -420,7 +448,6 @@ fn main() -> io::Result<()> {
                 click_map_buttons.push((row2_chunks[i], btns_r2[i].1));
             }
 
-            // --- FIXED: SLEEK DARK COLOR SCHEME ---
             let swap_btn_style = Style::default().fg(Color::Cyan).bg(Color::DarkGray).add_modifier(Modifier::BOLD);
             let swap_btn_block = Paragraph::new("🔄 SWAP SCREENS")
                 .alignment(Alignment::Center)
