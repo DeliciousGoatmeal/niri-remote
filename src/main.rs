@@ -32,20 +32,24 @@ fn niri_action(args: &[&str]) {
     let _ = Command::new("niri").arg("msg").arg("action").args(args).output();
 }
 
-// THE SMART SNAP: Eliminates the "shrinking gap" bug
 fn get_snapped_pct(width: f64, mon_width: f64) -> u32 {
     let raw_pct = (width / mon_width.max(1.0)) * 100.0;
-    
-    // Snap to perfectly clean Wayland layout fractions!
-    if raw_pct > 85.0 { 100 }      // Fullscreen
-    else if raw_pct > 60.0 { 67 }  // 2/3 Screen
-    else if raw_pct > 40.0 { 50 }  // 1/2 Screen
-    else if raw_pct > 28.0 { 33 }  // 1/3 Screen
-    else { 25 }                    // 1/4 Screen
+    if raw_pct > 85.0 { 100 }      
+    else if raw_pct > 60.0 { 67 }  
+    else if raw_pct > 40.0 { 50 }  
+    else if raw_pct > 28.0 { 33 }  
+    else { 25 }                    
 }
 
 fn swap_monitors() {
-    let out_output = Command::new("niri").args(["msg", "-j", "outputs"]).output().unwrap();
+    // SAFELY fetch outputs and log to stderr if it fails
+    let out_output = match Command::new("niri").args(["msg", "-j", "outputs"]).output() {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("ERR: Could not communicate with Niri to fetch outputs: {}", e);
+            return;
+        }
+    };
     let outputs_json: serde_json::Value = serde_json::from_slice(&out_output.stdout).unwrap_or_default();
     
     let mut monitors = Vec::new();
@@ -77,7 +81,14 @@ fn swap_monitors() {
         let right_mon = &monitors[1].0;
         let right_mon_w = monitors[1].2;
 
-        let ws_output = Command::new("niri").args(["msg", "-j", "workspaces"]).output().unwrap();
+        // SAFELY fetch workspaces
+        let ws_output = match Command::new("niri").args(["msg", "-j", "workspaces"]).output() {
+            Ok(ws) => ws,
+            Err(e) => {
+                eprintln!("ERR: Could not communicate with Niri to fetch workspaces: {}", e);
+                return;
+            }
+        };
         let workspaces_json: Vec<serde_json::Value> = serde_json::from_slice(&ws_output.stdout).unwrap_or_default();
         
         let mut left_ws_id = None;
@@ -92,55 +103,76 @@ fn swap_monitors() {
             }
         }
 
-        let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output().unwrap();
+        // SAFELY fetch windows
+        let win_output = match Command::new("niri").args(["msg", "-j", "windows"]).output() {
+            Ok(win) => win,
+            Err(e) => {
+                eprintln!("ERR: Could not communicate with Niri to fetch windows: {}", e);
+                return;
+            }
+        };
         let windows_json: Vec<serde_json::Value> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
 
-        let mut left_windows: Vec<(u64, u32)> = Vec::new();
-        let mut right_windows: Vec<(u64, u32)> = Vec::new();
+        let mut left_windows: Vec<(u64, u32, bool)> = Vec::new();
+        let mut right_windows: Vec<(u64, u32, bool)> = Vec::new();
 
         for win in windows_json {
             if let Some(ws_id) = win.get("workspace_id").and_then(|id| id.as_u64()) {
                 if let Some(id) = win.get("id").and_then(|id| id.as_u64()) {
                     let width = win.get("layout").and_then(|l| l.get("window_size")).and_then(|s| s.get(0)).and_then(|w| w.as_f64()).unwrap_or(1000.0);
+                    let is_fs = win.get("is_fullscreen").and_then(|f| f.as_bool()).unwrap_or(false);
 
                     if Some(ws_id) == left_ws_id {
-                        left_windows.push((id, get_snapped_pct(width, left_mon_w)));
+                        left_windows.push((id, get_snapped_pct(width, left_mon_w), is_fs));
                     } else if Some(ws_id) == right_ws_id {
-                        right_windows.push((id, get_snapped_pct(width, right_mon_w)));
+                        right_windows.push((id, get_snapped_pct(width, right_mon_w), is_fs));
                     }
                 }
             }
         }
 
-        if let Some(&(l_win, _)) = left_windows.first() {
+        if let Some(&(l_win, _, _)) = left_windows.first() {
             let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &l_win.to_string()]).output();
             let _ = Command::new("niri").args(["msg", "action", "move-workspace-to-monitor-right"]).output();
         }
-        if let Some(&(r_win, _)) = right_windows.first() {
+        if let Some(&(r_win, _, _)) = right_windows.first() {
             let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &r_win.to_string()]).output();
             let _ = Command::new("niri").args(["msg", "action", "move-workspace-to-monitor-left"]).output();
         }
 
-        // Apply percentages and snap the camera back to the first window!
-        for (id, pct) in &left_windows {
-            let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &id.to_string()]).output();
-            let _ = Command::new("niri").args(["msg", "action", "set-column-width", &format!("{}%", pct)]).output();
+        for (id, pct, is_fs) in &left_windows {
+            if !is_fs {
+                let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &id.to_string()]).output();
+                let _ = Command::new("niri").args(["msg", "action", "set-column-width", &format!("{}%", pct)]).output();
+            }
         }
-        if let Some(&(first_id, _)) = left_windows.first() {
+        if let Some(&(first_id, _, _)) = left_windows.first() {
             let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &first_id.to_string()]).output();
         }
 
-        for (id, pct) in &right_windows {
-            let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &id.to_string()]).output();
-            let _ = Command::new("niri").args(["msg", "action", "set-column-width", &format!("{}%", pct)]).output();
+        for (id, pct, is_fs) in &right_windows {
+            if !is_fs {
+                let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &id.to_string()]).output();
+                let _ = Command::new("niri").args(["msg", "action", "set-column-width", &format!("{}%", pct)]).output();
+            }
         }
-        if let Some(&(first_id, _)) = right_windows.first() {
+        if let Some(&(first_id, _, _)) = right_windows.first() {
             let _ = Command::new("niri").args(["msg", "action", "focus-window", "--id", &first_id.to_string()]).output();
         }
     }
 }
 
 fn main() -> io::Result<()> {
+    // GRACEFUL STARTUP CHECK: Does Niri even exist on this PC?
+    if let Err(e) = Command::new("niri").arg("--version").output() {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // Log to stderr instead of stdout
+            eprintln!("WARN: The 'niri' command was not found on this system.");
+            eprintln!("ERR: niri-remote requires the Niri Wayland compositor to be installed and accessible in the system PATH.");
+            return Ok(()); // Exit gracefully!
+        }
+    }
+
     let args: Vec<String> = env::args().collect();
     
     if args.len() > 1 {
@@ -178,7 +210,7 @@ fn main() -> io::Result<()> {
                 let target_win_id = if let Ok(id) = win_arg.parse::<u64>() { id } else {
                     let lower_arg = win_arg.to_lowercase();
                     if let Some(w) = windows.iter().find(|w| w.title.as_deref().unwrap_or("").to_lowercase().contains(&lower_arg)) { w.id } else {
-                        println!("Error: Could not find open window matching '{}'", win_arg);
+                        eprintln!("ERR: Could not find open window matching '{}'", win_arg);
                         return Ok(());
                     }
                 };
@@ -207,7 +239,7 @@ fn main() -> io::Result<()> {
                 let target_win_id = if let Ok(id) = win_arg.parse::<u64>() { id } else {
                     let lower_arg = win_arg.to_lowercase();
                     if let Some(w) = windows.iter().find(|w| w.title.as_deref().unwrap_or("").to_lowercase().contains(&lower_arg)) { w.id } else {
-                        println!("Error: Could not find open window matching '{}'", win_arg);
+                        eprintln!("ERR: Could not find open window matching '{}'", win_arg);
                         return Ok(());
                     }
                 };
@@ -246,7 +278,7 @@ fn main() -> io::Result<()> {
                 
                 let target_mon_name = if let Ok(idx) = mon_arg.parse::<usize>() {
                     if idx > 0 && idx <= monitors.len() { monitors[idx - 1].0.clone() } else {
-                        println!("Error: Display number {} is out of range.", idx);
+                        eprintln!("ERR: Display number {} is out of range.", idx);
                         return Ok(());
                     }
                 } else { mon_arg.clone() };
@@ -265,6 +297,7 @@ fn main() -> io::Result<()> {
         }
     }
 
+    // Launch the TUI
     stdout().execute(EnterAlternateScreen)?;
     stdout().execute(EnableMouseCapture)?;
     enable_raw_mode()?;
