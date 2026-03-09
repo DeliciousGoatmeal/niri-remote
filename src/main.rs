@@ -42,7 +42,6 @@ fn get_snapped_pct(width: f64, mon_width: f64) -> u32 {
 }
 
 fn swap_monitors() {
-    // SAFELY fetch outputs and log to stderr if it fails
     let out_output = match Command::new("niri").args(["msg", "-j", "outputs"]).output() {
         Ok(out) => out,
         Err(e) => {
@@ -81,7 +80,6 @@ fn swap_monitors() {
         let right_mon = &monitors[1].0;
         let right_mon_w = monitors[1].2;
 
-        // SAFELY fetch workspaces
         let ws_output = match Command::new("niri").args(["msg", "-j", "workspaces"]).output() {
             Ok(ws) => ws,
             Err(e) => {
@@ -103,7 +101,6 @@ fn swap_monitors() {
             }
         }
 
-        // SAFELY fetch windows
         let win_output = match Command::new("niri").args(["msg", "-j", "windows"]).output() {
             Ok(win) => win,
             Err(e) => {
@@ -163,13 +160,14 @@ fn swap_monitors() {
 }
 
 fn main() -> io::Result<()> {
-    // GRACEFUL STARTUP CHECK: Does Niri even exist on this PC?
     if let Err(e) = Command::new("niri").arg("--version").output() {
         if e.kind() == std::io::ErrorKind::NotFound {
-            // Log to stderr instead of stdout
             eprintln!("WARN: The 'niri' command was not found on this system.");
             eprintln!("ERR: niri-remote requires the Niri Wayland compositor to be installed and accessible in the system PATH.");
-            return Ok(()); // Exit gracefully!
+            eprintln!("Starting up in Empty Mode in 2 seconds...");
+            
+            // Give the user 2 seconds to read the warning before the UI clears the screen!
+            std::thread::sleep(std::time::Duration::from_secs(2));
         }
     }
 
@@ -183,7 +181,10 @@ fn main() -> io::Result<()> {
                 return Ok(());
             },
             "list" => {
-                let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output()?;
+                let win_output = match Command::new("niri").args(["msg", "-j", "windows"]).output() {
+                    Ok(o) => o,
+                    Err(_) => return Ok(()),
+                };
                 let windows: Vec<Window> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
                 
                 println!("\n{:<10} | {}", "WINDOW ID", "TITLE");
@@ -204,7 +205,10 @@ fn main() -> io::Result<()> {
                 let action_cmd = args[1].as_str();
                 let win_arg = &args[2];
 
-                let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output()?;
+                let win_output = match Command::new("niri").args(["msg", "-j", "windows"]).output() {
+                    Ok(o) => o,
+                    Err(_) => return Ok(()),
+                };
                 let windows: Vec<Window> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
                 
                 let target_win_id = if let Ok(id) = win_arg.parse::<u64>() { id } else {
@@ -233,7 +237,10 @@ fn main() -> io::Result<()> {
                 let win_arg = &args[2];
                 let mon_arg = &args[4];
 
-                let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output()?;
+                let win_output = match Command::new("niri").args(["msg", "-j", "windows"]).output() {
+                    Ok(o) => o,
+                    Err(_) => return Ok(()),
+                };
                 let windows: Vec<Window> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
                 
                 let target_win_id = if let Ok(id) = win_arg.parse::<u64>() { id } else {
@@ -244,7 +251,10 @@ fn main() -> io::Result<()> {
                     }
                 };
 
-                let out_output = Command::new("niri").args(["msg", "-j", "outputs"]).output()?;
+                let out_output = match Command::new("niri").args(["msg", "-j", "outputs"]).output() {
+                    Ok(o) => o,
+                    Err(_) => return Ok(()),
+                };
                 let outputs_json: serde_json::Value = serde_json::from_slice(&out_output.stdout).unwrap_or_default();
                 let mut monitors = Vec::new();
                 
@@ -265,7 +275,10 @@ fn main() -> io::Result<()> {
                 }
 
                 if monitors.is_empty() {
-                    let ws_output = Command::new("niri").args(["msg", "-j", "workspaces"]).output()?;
+                    let ws_output = match Command::new("niri").args(["msg", "-j", "workspaces"]).output() {
+                        Ok(o) => o,
+                        Err(_) => return Ok(()),
+                    };
                     let workspaces: Vec<Workspace> = serde_json::from_slice(&ws_output.stdout).unwrap_or_default();
                     for ws in workspaces {
                         if let Some(output) = ws.output {
@@ -297,7 +310,6 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Launch the TUI
     stdout().execute(EnterAlternateScreen)?;
     stdout().execute(EnableMouseCapture)?;
     enable_raw_mode()?;
@@ -316,8 +328,12 @@ fn main() -> io::Result<()> {
             ordered_monitors.clear();
             monitors_data.clear();
 
-            let out_output = Command::new("niri").args(["msg", "-j", "outputs"]).output()?;
-            let outputs_json: serde_json::Value = serde_json::from_slice(&out_output.stdout).unwrap_or_default();
+            // NEW: Safe parsing so the UI doesn't crash if Niri is missing
+            let outputs_json: serde_json::Value = Command::new("niri")
+                .args(["msg", "-j", "outputs"])
+                .output()
+                .map(|o| serde_json::from_slice(&o.stdout).unwrap_or_default())
+                .unwrap_or(serde_json::Value::Null);
             
             let mut monitors_sortable = Vec::new();
             if let Some(map) = outputs_json.as_object() {
@@ -339,8 +355,12 @@ fn main() -> io::Result<()> {
             monitors_sortable.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             ordered_monitors = monitors_sortable.into_iter().map(|m| m.0).collect();
 
-            let ws_output = Command::new("niri").args(["msg", "-j", "workspaces"]).output()?;
-            let workspaces: Vec<Workspace> = serde_json::from_slice(&ws_output.stdout).unwrap_or_default();
+            let workspaces: Vec<Workspace> = Command::new("niri")
+                .args(["msg", "-j", "workspaces"])
+                .output()
+                .map(|o| serde_json::from_slice(&o.stdout).unwrap_or_default())
+                .unwrap_or_default();
+            
             let mut ws_to_monitor: HashMap<u64, String> = HashMap::new();
             for ws in &workspaces {
                 if let Some(output) = &ws.output {
@@ -349,8 +369,11 @@ fn main() -> io::Result<()> {
                 }
             }
 
-            let win_output = Command::new("niri").args(["msg", "-j", "windows"]).output()?;
-            let windows: Vec<Window> = serde_json::from_slice(&win_output.stdout).unwrap_or_default();
+            let windows: Vec<Window> = Command::new("niri")
+                .args(["msg", "-j", "windows"])
+                .output()
+                .map(|o| serde_json::from_slice(&o.stdout).unwrap_or_default())
+                .unwrap_or_default();
 
             for win in windows {
                 if let Some(ws_id) = win.workspace_id {
@@ -384,62 +407,62 @@ fn main() -> io::Result<()> {
 
             let num_monitors = ordered_monitors.len() as u32;
             if num_monitors == 0 {
-                frame.render_widget(Paragraph::new("No windows found!"), main_chunks[0]);
-                return;
-            }
+                // If Niri isn't running, they get exactly what they asked for: The app boots, and gives a blank UI!
+                frame.render_widget(Paragraph::new("No windows found! (Is Niri running?)").alignment(Alignment::Center), main_chunks[0]);
+            } else {
+                let mon_constraints = vec![Constraint::Ratio(1, num_monitors); num_monitors as usize];
+                let monitor_chunks = Layout::default().direction(Direction::Horizontal).constraints(mon_constraints).split(main_chunks[0]);
 
-            let mon_constraints = vec![Constraint::Ratio(1, num_monitors); num_monitors as usize];
-            let monitor_chunks = Layout::default().direction(Direction::Horizontal).constraints(mon_constraints).split(main_chunks[0]);
+                for (mon_index, monitor_name) in ordered_monitors.iter().enumerate() {
+                    let mon_block = Block::default().title(format!(" {} ", monitor_name)).style(Style::default().bg(Color::Reset)); 
+                    let mon_inner_area = mon_block.inner(monitor_chunks[mon_index]);
+                    frame.render_widget(mon_block, monitor_chunks[mon_index]);
 
-            for (mon_index, monitor_name) in ordered_monitors.iter().enumerate() {
-                let mon_block = Block::default().title(format!(" {} ", monitor_name)).style(Style::default().bg(Color::Reset)); 
-                let mon_inner_area = mon_block.inner(monitor_chunks[mon_index]);
-                frame.render_widget(mon_block, monitor_chunks[mon_index]);
-
-                if let Some(columns) = monitors_data.get(monitor_name) {
-                    if !columns.is_empty() {
-                        let mut total_width: u32 = 0;
-                        let mut col_widths: Vec<u32> = Vec::new();
-                        
-                        for col_windows in columns.values() {
-                            let w = col_windows.first().and_then(|win| win.layout.as_ref()).and_then(|l| l.window_size.as_ref()).and_then(|s| s.get(0)).copied().unwrap_or(100) as u32; 
-                            col_widths.push(w);
-                            total_width += w;
-                        }
-
-                        let mut col_constraints = Vec::new();
-                        for w in col_widths { col_constraints.push(Constraint::Ratio(w, total_width.max(1))); }
-
-                        let horizontal_chunks = Layout::default().direction(Direction::Horizontal).constraints(col_constraints).split(mon_inner_area);
-
-                        for (col_index, (_col_id, col_windows)) in columns.iter().enumerate() {
-                            let mut total_height: u32 = 0;
-                            let mut win_heights: Vec<u32> = Vec::new();
-
-                            for win in col_windows.iter() {
-                                let h = win.layout.as_ref().and_then(|l| l.window_size.as_ref()).and_then(|s| s.get(1)).copied().unwrap_or(100) as u32;
-                                win_heights.push(h);
-                                total_height += h;
+                    if let Some(columns) = monitors_data.get(monitor_name) {
+                        if !columns.is_empty() {
+                            let mut total_width: u32 = 0;
+                            let mut col_widths: Vec<u32> = Vec::new();
+                            
+                            for col_windows in columns.values() {
+                                let w = col_windows.first().and_then(|win| win.layout.as_ref()).and_then(|l| l.window_size.as_ref()).and_then(|s| s.get(0)).copied().unwrap_or(100) as u32; 
+                                col_widths.push(w);
+                                total_width += w;
                             }
 
-                            let mut win_constraints = Vec::new();
-                            for h in win_heights { win_constraints.push(Constraint::Ratio(h, total_height.max(1))); }
+                            let mut col_constraints = Vec::new();
+                            for w in col_widths { col_constraints.push(Constraint::Ratio(w, total_width.max(1))); }
 
-                            let vertical_chunks = Layout::default().direction(Direction::Vertical).constraints(win_constraints).split(horizontal_chunks[col_index]);
+                            let horizontal_chunks = Layout::default().direction(Direction::Horizontal).constraints(col_constraints).split(mon_inner_area);
 
-                            for (win_index, window) in col_windows.iter().enumerate() {
-                                let chunk = vertical_chunks[win_index];
-                                click_map_windows.push((chunk, window.id));
+                            for (col_index, (_col_id, col_windows)) in columns.iter().enumerate() {
+                                let mut total_height: u32 = 0;
+                                let mut win_heights: Vec<u32> = Vec::new();
 
-                                let title = window.title.clone().unwrap_or_else(|| "Unknown".to_string());
-                                let (border_color, title_style) = if window.is_focused {
-                                    (Color::Green, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-                                } else {
-                                    (Color::DarkGray, Style::default().fg(Color::Gray))
-                                };
+                                for win in col_windows.iter() {
+                                    let h = win.layout.as_ref().and_then(|l| l.window_size.as_ref()).and_then(|s| s.get(1)).copied().unwrap_or(100) as u32;
+                                    win_heights.push(h);
+                                    total_height += h;
+                                }
 
-                                let block = Block::default().title(title).title_style(title_style).borders(Borders::ALL).border_style(Style::default().fg(border_color));
-                                frame.render_widget(Paragraph::new("").block(block), chunk);
+                                let mut win_constraints = Vec::new();
+                                for h in win_heights { win_constraints.push(Constraint::Ratio(h, total_height.max(1))); }
+
+                                let vertical_chunks = Layout::default().direction(Direction::Vertical).constraints(win_constraints).split(horizontal_chunks[col_index]);
+
+                                for (win_index, window) in col_windows.iter().enumerate() {
+                                    let chunk = vertical_chunks[win_index];
+                                    click_map_windows.push((chunk, window.id));
+
+                                    let title = window.title.clone().unwrap_or_else(|| "Unknown".to_string());
+                                    let (border_color, title_style) = if window.is_focused {
+                                        (Color::Green, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                                    } else {
+                                        (Color::DarkGray, Style::default().fg(Color::Gray))
+                                    };
+
+                                    let block = Block::default().title(title).title_style(title_style).borders(Borders::ALL).border_style(Style::default().fg(border_color));
+                                    frame.render_widget(Paragraph::new("").block(block), chunk);
+                                }
                             }
                         }
                     }
